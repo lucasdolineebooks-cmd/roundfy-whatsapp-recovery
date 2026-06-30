@@ -377,6 +377,23 @@ app.put('/config', authSeller, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Verifica se número existe no WhatsApp
+app.post('/test/verificar', authSeller, async (req, res) => {
+  const { telefone } = req.body;
+  if (!telefone) return res.status(400).json({ error: 'telefone obrigatório' });
+  const conn = connections.get(req.apiKey);
+  if (!conn?.socket || conn.status !== 'connected') {
+    return res.status(400).json({ error: 'WhatsApp não conectado' });
+  }
+  try {
+    const jid = formatPhone(telefone);
+    const [result] = await conn.socket.onWhatsApp(jid.replace('@s.whatsapp.net', ''));
+    res.json({ numero: telefone, jid, existe: !!result?.exists, output: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Disparo de teste: envia mensagem imediata sem esperar cron
 app.post('/test/disparar', authSeller, async (req, res) => {
   const { telefone, nome, valor, produto, pix_code } = req.body;
