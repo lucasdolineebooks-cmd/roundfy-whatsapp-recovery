@@ -180,7 +180,6 @@ async function enviarMensagem(api_key, telefone, mensagem) {
   const conn = connections.get(api_key);
   if (!conn?.socket || conn.status !== 'connected') throw new Error('WhatsApp não conectado');
 
-  // Resolve o JID canônico via onWhatsApp para lidar com variações do 9° dígito BR
   const digits = telefone.replace(/\D/g, '');
   const withCountry = digits.startsWith('55') ? digits : `55${digits}`;
   let jid = formatPhone(telefone);
@@ -189,7 +188,16 @@ async function enviarMensagem(api_key, telefone, mensagem) {
     if (result?.exists && result.jid) jid = result.jid;
   } catch {}
 
-  await conn.socket.sendMessage(jid, { text: mensagem });
+  console.log(`📤 Enviando para JID: ${jid}`);
+
+  await Promise.race([
+    conn.socket.sendMessage(jid, { text: mensagem }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout: socket pode estar zumbi')), 15000)
+    ),
+  ]);
+
+  console.log(`✅ Mensagem entregue ao socket: ${jid}`);
 }
 
 // ── Cron: a cada minuto verifica sessões ativas ────────────────────────────
@@ -307,6 +315,18 @@ app.get('/wa/qr', authSeller, (req, res) => {
 app.post('/wa/desconectar', authSeller, async (req, res) => {
   await desconectarSeller(req.apiKey);
   res.json({ ok: true });
+});
+
+// Fecha o socket e reconecta sem apagar a sessão (útil quando conexão fica zumbi)
+app.post('/wa/reconectar', authSeller, async (req, res) => {
+  const api_key = req.apiKey;
+  const conn = connections.get(api_key);
+  if (conn?.socket) {
+    try { conn.socket.end(undefined); } catch {}
+  }
+  connections.set(api_key, { status: 'disconnected', qr: null, socket: null });
+  setTimeout(() => conectarSeller(api_key), 1000);
+  res.json({ ok: true, message: 'Reconectando...' });
 });
 
 // ── Rotas recovery (chamadas pelo abacate-main) ────────────────────────────
