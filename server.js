@@ -395,6 +395,16 @@ app.put('/config', authSeller, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Retorna qual número está conectado
+app.get('/wa/info', authSeller, (req, res) => {
+  const conn = connections.get(req.apiKey);
+  if (!conn?.socket || conn.status !== 'connected') {
+    return res.status(400).json({ error: 'WhatsApp não conectado' });
+  }
+  const user = conn.socket.user;
+  res.json({ numero: user?.id || null, nome: user?.name || null });
+});
+
 // Verifica se número existe no WhatsApp
 app.post('/test/verificar', authSeller, async (req, res) => {
   const { telefone } = req.body;
