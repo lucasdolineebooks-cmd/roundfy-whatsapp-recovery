@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: roundfy-whatsapp-recovery
+    runtime: node
+    rootDir: whatsapp-recovery
+    buildCommand: npm install
+    startCommand: npm start
+    plan: starter
+    envVars:
+      - key: SUPABASE_URL
+        value: https://duissoyjdorqnspjltfi.supabase.co
+      - key: SUPABASE_SERVICE_KEY
+        value: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR1aXNzb3lqZG9ycW5zcGpsdGZpIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4Mjc3NjcxOCwiZXhwIjoyMDk4MzUyNzE4fQ.en7VSfyLeAyXBniqHuksxIKouU-YzYy-VW6eejeNdgU
+      - key: RECOVERY_SECRET
+        value: 4efea284babfd4f81073f221674a6f85af2749622050778f664813250dd2a012
+      - key: PORT
+        value: 3001
