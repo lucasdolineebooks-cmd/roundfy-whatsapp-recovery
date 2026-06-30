@@ -219,10 +219,11 @@ cron.schedule('* * * * *', async () => {
         if (sentMinutes.has(intervalo.minutos)) continue;
         if (minutosDecorridos < intervalo.minutos) continue;
 
-        const mensagem = intervalo.mensagem
+        const nomeProduto = config.nome_produto || session.produto || '';
+      const mensagem = intervalo.mensagem
           .replace(/{nome}/gi, session.nome || 'cliente')
           .replace(/{valor}/gi, `R$ ${(session.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`)
-          .replace(/{produto}/gi, session.produto || '')
+          .replace(/{produto}/gi, nomeProduto)
           .replace(/{pix}/gi, session.pix_code || '');
 
         try {
