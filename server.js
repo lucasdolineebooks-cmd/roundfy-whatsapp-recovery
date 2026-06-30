@@ -268,6 +268,11 @@ cron.schedule('* * * * *', async () => {
 
         try {
           await enviarMensagem(session.api_key, session.telefone, mensagem);
+          // Envia o código PIX separado logo em seguida para facilitar a cópia
+          if (session.pix_code) {
+            await new Promise(r => setTimeout(r, 800));
+            await enviarMensagem(session.api_key, session.telefone, session.pix_code);
+          }
           await supabase.from('recovery_messages_sent').insert({
             session_id: session.id,
             minutos: intervalo.minutos,
@@ -495,6 +500,11 @@ app.post('/test/disparar', authSeller, async (req, res) => {
 
     try {
       await enviarMensagem(req.apiKey, telefone, mensagem);
+      // Envia o código PIX separado logo em seguida
+      if (pix_code) {
+        await new Promise(r => setTimeout(r, 800));
+        await enviarMensagem(req.apiKey, telefone, pix_code);
+      }
       resultados.push({ minutos: intervalo.minutos, tipo: intervalo.tipo || 'pendente', ok: true });
     } catch (err) {
       resultados.push({ minutos: intervalo.minutos, tipo: intervalo.tipo || 'pendente', ok: false, erro: err.message });
