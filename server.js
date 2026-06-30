@@ -425,6 +425,22 @@ app.get('/wa/info', authSeller, (req, res) => {
   res.json({ numero: user?.id || null, nome: user?.name || null });
 });
 
+// Envia diretamente para um JID específico (debug — bypassa onWhatsApp)
+app.post('/test/enviar-jid', authSeller, async (req, res) => {
+  const { jid, mensagem } = req.body;
+  if (!jid || !mensagem) return res.status(400).json({ error: 'jid e mensagem obrigatórios' });
+  const conn = connections.get(req.apiKey);
+  if (!conn?.socket || conn.status !== 'connected') {
+    return res.status(400).json({ error: 'WhatsApp não conectado' });
+  }
+  try {
+    await conn.socket.sendMessage(jid, { text: mensagem });
+    res.json({ ok: true, jid });
+  } catch (err) {
+    res.status(500).json({ ok: false, erro: err.message });
+  }
+});
+
 // Verifica se número existe no WhatsApp
 app.post('/test/verificar', authSeller, async (req, res) => {
   const { telefone } = req.body;
