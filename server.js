@@ -539,6 +539,51 @@ app.get('/admin/connections', (req, res) => {
   res.json(list);
 });
 
+// Admin: todas as configs de automação + stats de cada seller
+app.get('/admin/automacoes', async (req, res) => {
+  const { data: configs } = await supabase
+    .from('recovery_configs')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (!configs?.length) return res.json([]);
+
+  const desde = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: sessions } = await supabase
+    .from('recovery_sessions')
+    .select('api_key, status, created_at')
+    .gte('created_at', desde);
+
+  const sessoesPorKey = {};
+  for (const s of (sessions || [])) {
+    if (!sessoesPorKey[s.api_key]) sessoesPorKey[s.api_key] = [];
+    sessoesPorKey[s.api_key].push(s);
+  }
+
+  const result = configs.map((c) => {
+    const ss = sessoesPorKey[c.api_key] || [];
+    const conn = connections.get(c.api_key);
+    return {
+      api_key: c.api_key,
+      ativo: c.ativo,
+      nome_produto: c.nome_produto || '',
+      total_intervalos: (c.intervalos || []).length,
+      intervalos_pendente: (c.intervalos || []).filter((i) => (i.tipo || 'pendente') === 'pendente').length,
+      intervalos_pago: (c.intervalos || []).filter((i) => i.tipo === 'pago').length,
+      intervalos: c.intervalos || [],
+      wa_status: conn?.status || 'disconnected',
+      stats_7d: {
+        total: ss.length,
+        paid: ss.filter((s) => s.status === 'paid').length,
+        active: ss.filter((s) => s.status === 'active').length,
+        conversao: ss.length > 0 ? ((ss.filter((s) => s.status === 'paid').length / ss.length) * 100).toFixed(1) : '0.0',
+      },
+    };
+  });
+
+  res.json(result);
+});
+
 // ── Boot: reconecta todos os sellers com sessão salva ─────────────────────
 
 async function reconectarTodos() {
