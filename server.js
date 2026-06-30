@@ -171,7 +171,17 @@ function formatPhone(telefone) {
 async function enviarMensagem(api_key, telefone, mensagem) {
   const conn = connections.get(api_key);
   if (!conn?.socket || conn.status !== 'connected') throw new Error('WhatsApp não conectado');
-  await conn.socket.sendMessage(formatPhone(telefone), { text: mensagem });
+
+  // Resolve o JID canônico via onWhatsApp para lidar com variações do 9° dígito BR
+  const digits = telefone.replace(/\D/g, '');
+  const withCountry = digits.startsWith('55') ? digits : `55${digits}`;
+  let jid = formatPhone(telefone);
+  try {
+    const [result] = await conn.socket.onWhatsApp(withCountry);
+    if (result?.exists && result.jid) jid = result.jid;
+  } catch {}
+
+  await conn.socket.sendMessage(jid, { text: mensagem });
 }
 
 // ── Cron: a cada minuto verifica sessões ativas ────────────────────────────
