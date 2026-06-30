@@ -268,8 +268,8 @@ cron.schedule('* * * * *', async () => {
 
         try {
           await enviarMensagem(session.api_key, session.telefone, mensagem);
-          // Envia o código PIX separado logo em seguida para facilitar a cópia
-          if (session.pix_code) {
+          // Envia o código PIX separado apenas para sessões pendentes (pago já foi confirmado)
+          if (session.pix_code && tipoDaSessao !== 'pago') {
             await new Promise(r => setTimeout(r, 800));
             await enviarMensagem(session.api_key, session.telefone, session.pix_code);
           }
@@ -380,9 +380,10 @@ app.post('/recovery/cancelar', authAbacate, async (req, res) => {
 // Dispara automações para venda paga
 app.post('/automation/paid', authAbacate, async (req, res) => {
   const { txid, api_key, telefone, nome, valor, produto, pix_code } = req.body;
-  if (!txid || !api_key || !telefone) {
-    return res.status(400).json({ error: 'txid, api_key e telefone obrigatórios' });
+  if (!txid || !api_key) {
+    return res.status(400).json({ error: 'txid e api_key obrigatórios' });
   }
+  if (!telefone) return res.json({ ok: true, skip: true, reason: 'sem_telefone' });
 
   const { data: config } = await supabase
     .from('recovery_configs')
