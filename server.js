@@ -19,6 +19,15 @@ const AUTH_BASE = path.join(__dirname, '.sessions');
 const app = express();
 app.use(express.json());
 
+// CORS — permite chamadas do dashboard Roundfy
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-api-key,x-recovery-secret');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 const RECOVERY_SECRET = process.env.RECOVERY_SECRET;
 const PORT = process.env.PORT || 3001;
