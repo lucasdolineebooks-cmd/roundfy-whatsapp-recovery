@@ -14,7 +14,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const AUTH_DIR = path.join(__dirname, '.auth_state');
+const AUTH_BASE = path.join(__dirname, '.sessions');
 
 const app = express();
 app.use(express.json());
@@ -23,125 +23,151 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const RECOVERY_SECRET = process.env.RECOVERY_SECRET;
 const PORT = process.env.PORT || 3001;
 
-let waSocket = null;
-let qrCode = null;
-let connectionStatus = 'disconnected';
+// api_key → { socket, status: 'disconnected'|'connecting'|'qr'|'connected', qr }
+const connections = new Map();
 
-// ── Auth state: carrega do Supabase no boot, salva de volta a cada update ──
-async function setupAuthState() {
-  if (!fs.existsSync(AUTH_DIR)) {
-    fs.mkdirSync(AUTH_DIR, { recursive: true });
+// ── Auth state por seller ──────────────────────────────────────────────────
+
+async function getAuthState(api_key) {
+  const sessionDir = path.join(AUTH_BASE, api_key);
+
+  if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
     const { data } = await supabase
-      .from('whatsapp_auth')
+      .from('whatsapp_sessions')
       .select('files')
-      .eq('id', 'main')
+      .eq('api_key', api_key)
       .single();
     if (data?.files) {
       for (const [filename, content] of Object.entries(data.files)) {
-        fs.writeFileSync(path.join(AUTH_DIR, filename), content);
+        fs.writeFileSync(path.join(sessionDir, filename), content);
       }
-      console.log('Auth state restaurado do Supabase');
     }
   }
 
-  const { state, saveCreds: originalSaveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { state, saveCreds: originalSaveCreds } = await useMultiFileAuthState(sessionDir);
 
   const saveCreds = async () => {
     await originalSaveCreds();
     try {
       const files = {};
-      for (const file of fs.readdirSync(AUTH_DIR)) {
-        files[file] = fs.readFileSync(path.join(AUTH_DIR, file), 'utf-8');
+      for (const file of fs.readdirSync(sessionDir)) {
+        files[file] = fs.readFileSync(path.join(sessionDir, file), 'utf-8');
       }
-      await supabase
-        .from('whatsapp_auth')
-        .upsert({ id: 'main', files, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+      await supabase.from('whatsapp_sessions').upsert(
+        { api_key, files, updated_at: new Date().toISOString() },
+        { onConflict: 'api_key' }
+      );
     } catch (err) {
-      console.error('Erro ao salvar auth no Supabase:', err.message);
+      console.error(`Erro ao salvar sessão ${api_key}:`, err.message);
     }
   };
 
   return { state, saveCreds };
 }
 
-// ── Formata número BR para JID do WhatsApp ──
-function formatPhone(telefone) {
-  const digits = telefone.replace(/\D/g, '');
-  const withCountry = digits.startsWith('55') ? digits : `55${digits}`;
-  // 12 dígitos = 55 + 2 área + 8 número → insere o 9
-  if (withCountry.length === 12) {
-    return `${withCountry.slice(0, 4)}9${withCountry.slice(4)}@s.whatsapp.net`;
-  }
-  return `${withCountry}@s.whatsapp.net`;
-}
+// ── Conectar seller ────────────────────────────────────────────────────────
 
-// ── Conexão Baileys ──
-async function conectarWhatsApp() {
+async function conectarSeller(api_key) {
+  const existing = connections.get(api_key);
+  if (existing?.status === 'connected' || existing?.status === 'connecting') return;
+
+  connections.set(api_key, { status: 'connecting', qr: null, socket: null });
+
   try {
-    const { state, saveCreds } = await setupAuthState();
+    const { state, saveCreds } = await getAuthState(api_key);
     const { version } = await fetchLatestBaileysVersion();
 
-    waSocket = makeWASocket({
+    const socket = makeWASocket({
       version,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
       },
       logger: pino({ level: 'silent' }),
-      printQRInTerminal: true,
+      printQRInTerminal: false,
       browser: ['Roundfy Recovery', 'Chrome', '1.0'],
       generateHighQualityLinkPreview: false,
     });
 
-    waSocket.ev.on('creds.update', saveCreds);
+    connections.set(api_key, { status: 'connecting', qr: null, socket });
 
-    waSocket.ev.on('connection.update', (update) => {
+    socket.ev.on('creds.update', saveCreds);
+
+    socket.ev.on('connection.update', (update) => {
       const { connection, lastDisconnect, qr } = update;
+      const c = connections.get(api_key) || {};
 
       if (qr) {
-        qrCode = qr;
-        connectionStatus = 'qr';
-        console.log('QR Code disponível em GET /admin/qr');
+        c.qr = qr;
+        c.status = 'qr';
+        connections.set(api_key, c);
       }
 
       if (connection === 'open') {
-        qrCode = null;
-        connectionStatus = 'connected';
-        console.log('✅ WhatsApp conectado!');
+        c.qr = null;
+        c.status = 'connected';
+        connections.set(api_key, c);
+        console.log(`✅ WhatsApp conectado: ${api_key}`);
       }
 
       if (connection === 'close') {
-        connectionStatus = 'disconnected';
+        c.status = 'disconnected';
+        c.qr = null;
+        connections.set(api_key, c);
+
         const statusCode = lastDisconnect?.error instanceof Boom
           ? lastDisconnect.error.output.statusCode
           : undefined;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log('WhatsApp desconectado. Reconectar:', shouldReconnect);
+
         if (shouldReconnect) {
-          setTimeout(conectarWhatsApp, 5000);
+          setTimeout(() => conectarSeller(api_key), 5000);
         } else {
-          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-          supabase.from('whatsapp_auth').delete().eq('id', 'main').then(() => {});
+          // Deslogado — limpa sessão
+          const sessionDir = path.join(AUTH_BASE, api_key);
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+          supabase.from('whatsapp_sessions').delete().eq('api_key', api_key).then(() => {});
+          connections.delete(api_key);
+          console.log(`🔴 WhatsApp deslogado: ${api_key}`);
         }
       }
     });
   } catch (err) {
-    console.error('Erro ao inicializar WhatsApp:', err.message);
-    setTimeout(conectarWhatsApp, 10000);
+    console.error(`Erro ao conectar ${api_key}:`, err.message);
+    connections.set(api_key, { status: 'disconnected', qr: null, socket: null });
   }
 }
 
-async function enviarMensagem(telefone, mensagem) {
-  if (!waSocket || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp não conectado');
-  }
-  await waSocket.sendMessage(formatPhone(telefone), { text: mensagem });
+async function desconectarSeller(api_key) {
+  const conn = connections.get(api_key);
+  try { if (conn?.socket) await conn.socket.logout(); } catch {}
+  const sessionDir = path.join(AUTH_BASE, api_key);
+  fs.rmSync(sessionDir, { recursive: true, force: true });
+  await supabase.from('whatsapp_sessions').delete().eq('api_key', api_key);
+  connections.delete(api_key);
 }
 
-// ── Cron: a cada minuto verifica sessões pendentes ──
+// ── Formata número BR ──────────────────────────────────────────────────────
+
+function formatPhone(telefone) {
+  const digits = telefone.replace(/\D/g, '');
+  const withCountry = digits.startsWith('55') ? digits : `55${digits}`;
+  if (withCountry.length === 12) {
+    return `${withCountry.slice(0, 4)}9${withCountry.slice(4)}@s.whatsapp.net`;
+  }
+  return `${withCountry}@s.whatsapp.net`;
+}
+
+async function enviarMensagem(api_key, telefone, mensagem) {
+  const conn = connections.get(api_key);
+  if (!conn?.socket || conn.status !== 'connected') throw new Error('WhatsApp não conectado');
+  await conn.socket.sendMessage(formatPhone(telefone), { text: mensagem });
+}
+
+// ── Cron: a cada minuto verifica sessões pendentes ─────────────────────────
+
 cron.schedule('* * * * *', async () => {
-  if (connectionStatus !== 'connected') return;
-
   try {
     const { data: sessions } = await supabase
       .from('recovery_sessions')
@@ -163,6 +189,9 @@ cron.schedule('* * * * *', async () => {
       const config = configMap[session.api_key];
       if (!config?.intervalos?.length) continue;
 
+      const conn = connections.get(session.api_key);
+      if (!conn || conn.status !== 'connected') continue;
+
       const { data: sent } = await supabase
         .from('recovery_messages_sent')
         .select('minutos')
@@ -171,7 +200,6 @@ cron.schedule('* * * * *', async () => {
       const sentMinutes = new Set((sent || []).map((s) => s.minutos));
       const minutosDecorridos = (Date.now() - new Date(session.created_at).getTime()) / 60000;
 
-      // Todos enviados → marca expirado
       const todosEnviados = config.intervalos.every((i) => sentMinutes.has(i.minutos));
       if (todosEnviados) {
         await supabase.from('recovery_sessions').update({ status: 'expired' }).eq('id', session.id);
@@ -189,12 +217,12 @@ cron.schedule('* * * * *', async () => {
           .replace(/{pix}/gi, session.pix_code || '');
 
         try {
-          await enviarMensagem(session.telefone, mensagem);
+          await enviarMensagem(session.api_key, session.telefone, mensagem);
           await supabase.from('recovery_messages_sent').insert({
             session_id: session.id,
             minutos: intervalo.minutos,
           });
-          console.log(`✓ ${intervalo.minutos}min → ${session.telefone} (${session.txid})`);
+          console.log(`✓ ${intervalo.minutos}min → ${session.telefone}`);
         } catch (err) {
           console.error(`✗ ${intervalo.minutos}min → ${session.telefone}:`, err.message);
         }
@@ -205,7 +233,8 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// ── Middlewares ──
+// ── Middlewares ────────────────────────────────────────────────────────────
+
 function authAbacate(req, res, next) {
   if (!RECOVERY_SECRET || req.headers['x-recovery-secret'] !== RECOVERY_SECRET) {
     return res.status(403).json({ error: 'Unauthorized' });
@@ -220,7 +249,31 @@ function authSeller(req, res, next) {
   next();
 }
 
-// ── Rotas chamadas pelo abacate-main ──
+// ── Rotas WhatsApp (por seller) ────────────────────────────────────────────
+
+app.post('/wa/conectar', authSeller, async (req, res) => {
+  const conn = connections.get(req.apiKey);
+  if (conn?.status === 'connected') return res.json({ status: 'connected' });
+  conectarSeller(req.apiKey);
+  res.json({ status: 'connecting' });
+});
+
+app.get('/wa/status', authSeller, (req, res) => {
+  const conn = connections.get(req.apiKey);
+  res.json({ status: conn?.status || 'disconnected', hasQr: !!conn?.qr });
+});
+
+app.get('/wa/qr', authSeller, (req, res) => {
+  const conn = connections.get(req.apiKey);
+  res.json({ qr: conn?.qr || null });
+});
+
+app.post('/wa/desconectar', authSeller, async (req, res) => {
+  await desconectarSeller(req.apiKey);
+  res.json({ ok: true });
+});
+
+// ── Rotas recovery (chamadas pelo abacate-main) ────────────────────────────
 
 app.post('/recovery/iniciar', authAbacate, async (req, res) => {
   const { txid, api_key, telefone, nome, valor, produto, pix_code } = req.body;
@@ -237,16 +290,7 @@ app.post('/recovery/iniciar', authAbacate, async (req, res) => {
   if (!config?.ativo) return res.json({ ok: true, skip: true });
 
   await supabase.from('recovery_sessions').upsert(
-    {
-      txid,
-      api_key,
-      telefone: telefone.replace(/\D/g, ''),
-      nome,
-      valor,
-      produto,
-      pix_code,
-      status: 'active',
-    },
+    { txid, api_key, telefone: telefone.replace(/\D/g, ''), nome, valor, produto, pix_code, status: 'active' },
     { onConflict: 'txid' }
   );
 
@@ -256,17 +300,15 @@ app.post('/recovery/iniciar', authAbacate, async (req, res) => {
 app.post('/recovery/cancelar', authAbacate, async (req, res) => {
   const { txid } = req.body;
   if (!txid) return res.status(400).json({ error: 'txid obrigatório' });
-
   await supabase
     .from('recovery_sessions')
     .update({ status: 'paid', updated_at: new Date().toISOString() })
     .eq('txid', txid)
     .eq('status', 'active');
-
   res.json({ ok: true });
 });
 
-// ── Rotas do seller (dashboard) ──
+// ── Config e stats do seller ───────────────────────────────────────────────
 
 app.get('/config', authSeller, async (req, res) => {
   const { data } = await supabase
@@ -283,7 +325,7 @@ app.put('/config', authSeller, async (req, res) => {
     { api_key: req.apiKey, ativo: !!ativo, intervalos: intervalos || [] },
     { onConflict: 'api_key' }
   );
-  if (error) return res.status(500).json({ error: 'Erro ao salvar configuração' });
+  if (error) return res.status(500).json({ error: 'Erro ao salvar' });
   res.json({ ok: true });
 });
 
@@ -299,32 +341,33 @@ app.get('/stats', authSeller, async (req, res) => {
   const paid = sessions?.filter((s) => s.status === 'paid').length || 0;
   const active = sessions?.filter((s) => s.status === 'active').length || 0;
 
-  res.json({
-    total,
-    paid,
-    active,
-    conversao: total > 0 ? ((paid / total) * 100).toFixed(1) : '0.0',
-  });
+  res.json({ total, paid, active, conversao: total > 0 ? ((paid / total) * 100).toFixed(1) : '0.0' });
 });
 
-// ── Rotas admin ──
+// ── Admin: visão geral de todos os sellers conectados ─────────────────────
 
-app.get('/admin/status', (req, res) => {
-  res.json({ status: connectionStatus, hasQr: !!qrCode });
+app.get('/admin/connections', (req, res) => {
+  const list = [];
+  for (const [api_key, conn] of connections.entries()) {
+    list.push({ api_key, status: conn.status });
+  }
+  res.json(list);
 });
 
-app.get('/admin/qr', (req, res) => {
-  res.json({ qr: qrCode });
-});
+// ── Boot: reconecta todos os sellers com sessão salva ─────────────────────
 
-app.post('/admin/desconectar', async (req, res) => {
-  try {
-    if (waSocket) await waSocket.logout();
-  } catch {}
-  res.json({ ok: true });
-});
+async function reconectarTodos() {
+  const { data: sessions } = await supabase
+    .from('whatsapp_sessions')
+    .select('api_key');
+  for (const { api_key } of (sessions || [])) {
+    conectarSeller(api_key).catch((err) =>
+      console.error(`Erro ao reconectar ${api_key}:`, err.message)
+    );
+  }
+}
 
 app.listen(PORT, () => {
   console.log(`🚀 Roundfy WhatsApp Recovery na porta ${PORT}`);
-  conectarWhatsApp();
+  reconectarTodos();
 });
