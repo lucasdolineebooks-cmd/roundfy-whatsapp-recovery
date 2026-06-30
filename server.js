@@ -59,14 +59,22 @@ async function getAuthState(api_key) {
   const saveCreds = async () => {
     await originalSaveCreds();
     try {
+      // Salva todos os arquivos .json da sessão no Supabase
       const files = {};
       for (const file of fs.readdirSync(sessionDir)) {
+        if (!file.endsWith('.json')) continue;
         files[file] = fs.readFileSync(path.join(sessionDir, file), 'utf-8');
       }
-      await supabase.from('whatsapp_sessions').upsert(
+      if (!Object.keys(files).length) return;
+      const { error } = await supabase.from('whatsapp_sessions').upsert(
         { api_key, files, updated_at: new Date().toISOString() },
         { onConflict: 'api_key' }
       );
+      if (error) {
+        console.error(`❌ Supabase erro ao salvar sessão ${api_key}:`, error.message, error.details);
+      } else {
+        console.log(`💾 Sessão salva: ${api_key} (${Object.keys(files).length} arquivos)`);
+      }
     } catch (err) {
       console.error(`Erro ao salvar sessão ${api_key}:`, err.message);
     }
