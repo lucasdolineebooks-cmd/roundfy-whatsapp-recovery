@@ -190,6 +190,12 @@ async function enviarMensagem(api_key, telefone, mensagem) {
 
   console.log(`📤 Enviando para JID: ${jid}`);
 
+  // Assegura que a sessão signal com o destinatário foi estabelecida
+  try {
+    await conn.socket.presenceSubscribe(jid);
+    await new Promise(r => setTimeout(r, 500));
+  } catch {}
+
   await Promise.race([
     conn.socket.sendMessage(jid, { text: mensagem }),
     new Promise((_, reject) =>
