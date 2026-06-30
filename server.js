@@ -364,17 +364,57 @@ app.get('/config', authSeller, async (req, res) => {
     .select('*')
     .eq('api_key', req.apiKey)
     .single();
-  res.json(data || { ativo: false, intervalos: [] });
+  res.json(data || { ativo: false, intervalos: [], nome_produto: '' });
 });
 
 app.put('/config', authSeller, async (req, res) => {
-  const { ativo, intervalos } = req.body;
+  const { ativo, intervalos, nome_produto } = req.body;
   const { error } = await supabase.from('recovery_configs').upsert(
-    { api_key: req.apiKey, ativo: !!ativo, intervalos: intervalos || [] },
+    { api_key: req.apiKey, ativo: !!ativo, intervalos: intervalos || [], nome_produto: nome_produto || '' },
     { onConflict: 'api_key' }
   );
   if (error) return res.status(500).json({ error: 'Erro ao salvar' });
   res.json({ ok: true });
+});
+
+// Disparo de teste: envia mensagem imediata sem esperar cron
+app.post('/test/disparar', authSeller, async (req, res) => {
+  const { telefone, nome, valor, produto, pix_code } = req.body;
+  if (!telefone) return res.status(400).json({ error: 'telefone obrigatório' });
+
+  const conn = connections.get(req.apiKey);
+  if (!conn || conn.status !== 'connected') {
+    return res.status(400).json({ error: 'WhatsApp não conectado para esta conta' });
+  }
+
+  const { data: config } = await supabase
+    .from('recovery_configs')
+    .select('*')
+    .eq('api_key', req.apiKey)
+    .single();
+
+  const intervalos = (config?.intervalos || []);
+  if (!intervalos.length) return res.status(400).json({ error: 'Nenhuma automação configurada' });
+
+  const nomeProduto = config?.nome_produto || produto || 'produto';
+  const resultados = [];
+
+  for (const intervalo of intervalos) {
+    const mensagem = intervalo.mensagem
+      .replace(/{nome}/gi, nome || 'cliente')
+      .replace(/{valor}/gi, valor ? `R$ ${Number(valor).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` : 'R$ 0,00')
+      .replace(/{produto}/gi, nomeProduto)
+      .replace(/{pix}/gi, pix_code || '');
+
+    try {
+      await enviarMensagem(req.apiKey, telefone, mensagem);
+      resultados.push({ minutos: intervalo.minutos, tipo: intervalo.tipo || 'pendente', ok: true });
+    } catch (err) {
+      resultados.push({ minutos: intervalo.minutos, tipo: intervalo.tipo || 'pendente', ok: false, erro: err.message });
+    }
+  }
+
+  res.json({ ok: true, enviados: resultados });
 });
 
 app.get('/stats', authSeller, async (req, res) => {
