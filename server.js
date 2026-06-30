@@ -174,7 +174,7 @@ async function enviarMensagem(api_key, telefone, mensagem) {
   await conn.socket.sendMessage(formatPhone(telefone), { text: mensagem });
 }
 
-// ── Cron: a cada minuto verifica sessões pendentes ─────────────────────────
+// ── Cron: a cada minuto verifica sessões ativas ────────────────────────────
 
 cron.schedule('* * * * *', async () => {
   try {
@@ -201,6 +201,14 @@ cron.schedule('* * * * *', async () => {
       const conn = connections.get(session.api_key);
       if (!conn || conn.status !== 'connected') continue;
 
+      const tipoDaSessao = session.tipo || 'pendente';
+      const intervalosDoTipo = config.intervalos.filter((i) => (i.tipo || 'pendente') === tipoDaSessao);
+
+      if (!intervalosDoTipo.length) {
+        await supabase.from('recovery_sessions').update({ status: 'expired' }).eq('id', session.id);
+        continue;
+      }
+
       const { data: sent } = await supabase
         .from('recovery_messages_sent')
         .select('minutos')
@@ -209,18 +217,18 @@ cron.schedule('* * * * *', async () => {
       const sentMinutes = new Set((sent || []).map((s) => s.minutos));
       const minutosDecorridos = (Date.now() - new Date(session.created_at).getTime()) / 60000;
 
-      const todosEnviados = config.intervalos.every((i) => sentMinutes.has(i.minutos));
+      const todosEnviados = intervalosDoTipo.every((i) => sentMinutes.has(i.minutos));
       if (todosEnviados) {
         await supabase.from('recovery_sessions').update({ status: 'expired' }).eq('id', session.id);
         continue;
       }
 
-      for (const intervalo of config.intervalos) {
+      for (const intervalo of intervalosDoTipo) {
         if (sentMinutes.has(intervalo.minutos)) continue;
         if (minutosDecorridos < intervalo.minutos) continue;
 
         const nomeProduto = config.nome_produto || session.produto || '';
-      const mensagem = intervalo.mensagem
+        const mensagem = intervalo.mensagem
           .replace(/{nome}/gi, session.nome || 'cliente')
           .replace(/{valor}/gi, `R$ ${(session.valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}`)
           .replace(/{produto}/gi, nomeProduto)
@@ -232,9 +240,9 @@ cron.schedule('* * * * *', async () => {
             session_id: session.id,
             minutos: intervalo.minutos,
           });
-          console.log(`✓ ${intervalo.minutos}min → ${session.telefone}`);
+          console.log(`✓ [${tipoDaSessao}] ${intervalo.minutos}min → ${session.telefone}`);
         } catch (err) {
-          console.error(`✗ ${intervalo.minutos}min → ${session.telefone}:`, err.message);
+          console.error(`✗ [${tipoDaSessao}] ${intervalo.minutos}min → ${session.telefone}:`, err.message);
         }
       }
     }
@@ -310,11 +318,41 @@ app.post('/recovery/iniciar', authAbacate, async (req, res) => {
 app.post('/recovery/cancelar', authAbacate, async (req, res) => {
   const { txid } = req.body;
   if (!txid) return res.status(400).json({ error: 'txid obrigatório' });
+  // Cancela apenas sessões pendentes (tipo = 'pendente')
   await supabase
     .from('recovery_sessions')
     .update({ status: 'paid', updated_at: new Date().toISOString() })
     .eq('txid', txid)
+    .eq('tipo', 'pendente')
     .eq('status', 'active');
+  res.json({ ok: true });
+});
+
+// Dispara automações para venda paga
+app.post('/automation/paid', authAbacate, async (req, res) => {
+  const { txid, api_key, telefone, nome, valor, produto, pix_code } = req.body;
+  if (!txid || !api_key || !telefone) {
+    return res.status(400).json({ error: 'txid, api_key e telefone obrigatórios' });
+  }
+
+  const { data: config } = await supabase
+    .from('recovery_configs')
+    .select('ativo, intervalos')
+    .eq('api_key', api_key)
+    .single();
+
+  const temAutomacaoPaga = config?.ativo &&
+    config?.intervalos?.some((i) => (i.tipo || 'pendente') === 'pago');
+
+  if (!temAutomacaoPaga) return res.json({ ok: true, skip: true });
+
+  // Cria sessão do tipo "pago" — txid único: paid_ + txid original
+  const txidPago = `paid_${txid}`;
+  await supabase.from('recovery_sessions').upsert(
+    { txid: txidPago, api_key, telefone: telefone.replace(/\D/g, ''), nome, valor, produto, pix_code, status: 'active', tipo: 'pago' },
+    { onConflict: 'txid' }
+  );
+
   res.json({ ok: true });
 });
 
