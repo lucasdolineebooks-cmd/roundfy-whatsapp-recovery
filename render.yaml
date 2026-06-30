@@ -2,7 +2,6 @@ services:
   - type: web
     name: roundfy-whatsapp-recovery
     runtime: node
-    rootDir: whatsapp-recovery
     buildCommand: npm install
     startCommand: npm start
     plan: starter
