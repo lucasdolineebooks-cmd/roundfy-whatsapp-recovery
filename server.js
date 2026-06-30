@@ -367,13 +367,13 @@ app.post('/recovery/iniciar', authAbacate, async (req, res) => {
 app.post('/recovery/cancelar', authAbacate, async (req, res) => {
   const { txid } = req.body;
   if (!txid) return res.status(400).json({ error: 'txid obrigatório' });
-  // Cancela apenas sessões pendentes (tipo = 'pendente')
+  // Marca como paga independente do status atual (active ou expired)
   await supabase
     .from('recovery_sessions')
     .update({ status: 'paid', updated_at: new Date().toISOString() })
     .eq('txid', txid)
     .eq('tipo', 'pendente')
-    .eq('status', 'active');
+    .in('status', ['active', 'expired']);
   res.json({ ok: true });
 });
 
