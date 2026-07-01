@@ -185,7 +185,16 @@ async function enviarMensagem(api_key, telefone, mensagem) {
   let jid = formatPhone(telefone);
   try {
     const [result] = await conn.socket.onWhatsApp(withCountry);
-    if (result?.exists && result.jid) jid = result.jid;
+    // onWhatsApp pode retornar JID em formato @lid (novo sistema WhatsApp) —
+    // sendMessage só aceita @s.whatsapp.net, então extraímos o número do JID
+    // retornado e montamos o JID correto no formato antigo.
+    if (result?.exists) {
+      const rawJid = result.jid || '';
+      const numFromJid = rawJid.split('@')[0];
+      if (numFromJid) {
+        jid = `${numFromJid}@s.whatsapp.net`;
+      }
+    }
   } catch {}
 
   console.log(`📤 Enviando para JID: ${jid}`);
